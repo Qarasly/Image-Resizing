@@ -3,3 +3,4 @@ pandas
 cloudinary
 Pillow
 requests
+openpyxl
