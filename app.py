@@ -8,6 +8,7 @@ from io import BytesIO
 import re
 
 # --- 1. CONFIGURATION ---
+# Permanent Cloudinary Credentials
 cloudinary.config(
     cloud_name = "djhyyziqe",
     api_key = "973845594791418",
@@ -16,6 +17,8 @@ cloudinary.config(
 
 def get_direct_url(url):
     """Converts Google Drive sharing links to direct download links."""
+    if pd.isna(url): return url
+    url = str(url).strip()
     if "drive.google.com" in url:
         match = re.search(r"/d/([^/]+)", url)
         if match:
@@ -24,15 +27,9 @@ def get_direct_url(url):
     return url
 
 def resize_with_padding(img, target_size=(660, 900), background_color=(255, 255, 255)):
-    """Resizes image to fit within target_size without cropping or stretching, adding padding."""
-    # Get original dimensions
+    """Resizes image into 660x900 using white padding to prevent stretching or cropping."""
     img.thumbnail(target_size, Image.Resampling.LANCZOS)
-    
-    # Create a new white background canvas
     new_img = Image.new("RGB", target_size, background_color)
-    
-    # Center the resized image on the canvas
-    # Use ( (canvas_width - img_width)//2, (canvas_height - img_height)//2 )
     paste_pos = (
         (target_size[0] - img.size[0]) // 2,
         (target_size[1] - img.size[1]) // 2
@@ -54,7 +51,6 @@ def cached_process_upload(image_url, psku, suffix):
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
         
-        # Apply Padding Logic instead of Cropping
         img = resize_with_padding(img)
         
         buf = BytesIO()
@@ -73,54 +69,87 @@ def cached_process_upload(image_url, psku, suffix):
         return f"Error: {str(e)}"
 
 # --- 2. UI LAYOUT ---
-st.set_page_config(page_title="Pro SKU Resizer (Padded)", layout="wide")
+st.set_page_config(page_title="Bulk Image Resizing", layout="wide", page_icon="🖼️")
 
-st.title("🖼️ Pro SKU Resizer (No-Crop / No-Stretch)")
-st.info("This version adds white padding to ensure the whole image fits perfectly in a 660x900 frame.")
+st.title("🖼️ Bulk Image Resizing")
 
-uploaded_file = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
+# Instructions Section
+with st.expander("📖 Instructions - How to use this tool", expanded=True):
+    st.markdown("""
+    1. **Upload File:** Upload your Excel (.xlsx) or CSV file containing SKU/Barcode and Image Links.
+    2. **Map Columns:** * Select the column that identifies your product (e.g., **PSKU** or **Barcode**).
+        * Select one or more columns that contain the **Original Image Links**.
+    3. **Google Drive Links:** Ensure Google Drive links are set to **"Anyone with the link can view"**.
+    4. **Process:** Click **Start Processing**. The tool adds white padding to keep your images proportional at **660x900px**.
+    5. **Download:** Once finished, download the new Excel. The **'Resized Links'** sheet contains your permanent URLs.
+    """)
+
+st.divider()
+
+uploaded_file = st.file_uploader("Upload your product sheet", type=["csv", "xlsx"])
 
 if uploaded_file:
-    df_original = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+    # Load Data
+    if uploaded_file.name.endswith('.csv'):
+        df_original = pd.read_csv(uploaded_file)
+    else:
+        df_original = pd.read_excel(uploaded_file)
+    
+    st.success(f"File loaded successfully ({len(df_original)} rows found).")
     
     col1, col2 = st.columns(2)
     with col1:
-        sku_col = st.selectbox("SKU Column", df_original.columns)
+        sku_col = st.selectbox("Select SKU / Barcode Column", df_original.columns)
     with col2:
-        url_cols = st.multiselect("Image Link Columns", [c for c in df_original.columns if c != sku_col])
+        url_cols = st.multiselect("Select Image URL Column(s)", [c for c in df_original.columns if c != sku_col])
 
-    if st.button("🚀 Process Batch") and url_cols:
+    if st.button("🚀 Start Processing") and url_cols:
         df_resized = df_original.copy()
-        progress_bar = st.progress(0)
-        status_msg = st.empty()
         
-        total_tasks = len(df_original) * len(url_cols)
-        current_task = 0
+        # Progress Tracking UI
+        progress_container = st.container()
+        with progress_container:
+            st.write("### Processing Status")
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            counter_display = st.empty()
+        
+        total_rows = len(df_original)
+        total_cols = len(url_cols)
+        total_tasks = total_rows * total_cols
+        processed_count = 0
         
         for url_col in url_cols:
             new_links = []
             for i, row in df_original.iterrows():
                 current_sku = str(row[sku_col])
-                status_msg.markdown(f"**Processing:** `{current_sku}`")
                 
+                # Increment and update counter
+                processed_count += 1
+                percent = int((processed_count / total_tasks) * 100)
+                
+                status_text.markdown(f"**Current Task:** `{url_col}` | **Current SKU:** `{current_sku}`")
+                counter_display.info(f"Processed {processed_count} of {total_tasks} images ({percent}%)")
+                progress_bar.progress(processed_count / total_tasks)
+                
+                # Logic Execution
                 link = cached_process_upload(row[url_col], current_sku, url_col)
                 new_links.append(link)
-                
-                current_task += 1
-                progress_bar.progress(current_task / total_tasks)
             
             df_resized[url_col] = new_links
 
-        status_msg.success("✅ Finished!")
+        status_text.success(f"✅ Successfully processed {total_tasks} images!")
+        counter_display.empty()
         
+        # Final Excel Generation
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_original.to_excel(writer, sheet_name='Original Links', index=False)
             df_resized.to_excel(writer, sheet_name='Resized Links', index=False)
         
         st.download_button(
-            label="📥 Download Results",
+            label="📥 Download Processed Excel File",
             data=output.getvalue(),
-            file_name="resized_padded.xlsx",
+            file_name="Bulk_Resized_Images.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
