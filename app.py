@@ -2,13 +2,12 @@ import streamlit as st
 import pandas as pd
 import cloudinary
 import cloudinary.uploader
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageStat
 import requests
 from io import BytesIO
 import re
 
 # --- 1. CONFIGURATION ---
-# Permanent Cloudinary Credentials
 cloudinary.config(
     cloud_name = "djhyyziqe",
     api_key = "973845594791418",
@@ -18,22 +17,50 @@ cloudinary.config(
 def get_direct_url(url):
     """Clean the URL and convert Google Drive sharing links to direct download links."""
     if pd.isna(url): return url
-    
-    # Remove spaces, newlines, and hidden characters (%0A)
     url = str(url).strip().replace('\n', '').replace('\r', '').replace('%0A', '')
-    
     if "drive.google.com" in url:
-        # Regex to find the File ID (long string of characters)
         match = re.search(r"/d/([a-zA-Z0-9_-]{25,})", url)
         if match:
             file_id = match.group(1)
             return f"https://drive.google.com/uc?export=download&id={file_id}"
     return url
 
-def resize_with_padding(img, target_size=(660, 900), background_color=(255, 255, 255)):
-    """Resizes image to 660x900 using white padding to avoid cropping or stretching."""
+def detect_background_color(img):
+    """Detects the dominant color at the edges of the image to use for padding."""
+    # Convert to RGB if needed
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    
+    # Sample small areas from the four corners (5x5 pixels)
+    w, h = img.size
+    corners = [
+        img.crop((0, 0, 5, 5)),           # Top-left
+        img.crop((w-5, 0, w, 5)),         # Top-right
+        img.crop((0, h-5, 5, h)),         # Bottom-left
+        img.crop((w-5, h-5, w, h))        # Bottom-right
+    ]
+    
+    # Calculate the average color of all sampled corner pixels
+    r, g, b = 0, 0, 0
+    for corner in corners:
+        stat = ImageStat.Stat(corner)
+        r += stat.mean[0]
+        g += stat.mean[1]
+        b += stat.mean[2]
+    
+    return (int(r/4), int(g/4), int(b/4))
+
+def resize_with_smart_padding(img, target_size=(660, 900)):
+    """Resizes image and fills gaps with the detected background color."""
+    bg_color = detect_background_color(img)
+    
+    # Resize image to fit within bounds
     img.thumbnail(target_size, Image.Resampling.LANCZOS)
-    new_img = Image.new("RGB", target_size, background_color)
+    
+    # Create new canvas with detected color
+    new_img = Image.new("RGB", target_size, bg_color)
+    
+    # Center the image
     paste_pos = (
         (target_size[0] - img.size[0]) // 2,
         (target_size[1] - img.size[1]) // 2
@@ -48,28 +75,21 @@ def cached_process_upload(image_url, psku, suffix):
             return "No Link"
             
         direct_url = get_direct_url(image_url)
-        
-        # Mimic browser headers to avoid being blocked by servers
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
+        headers = {"User-Agent": "Mozilla/5.0"}
         
         response = requests.get(direct_url, headers=headers, timeout=20)
         response.raise_for_status()
         
         img = Image.open(BytesIO(response.content))
-        if img.mode in ("RGBA", "P"):
-            img = img.convert("RGB")
         
-        img = resize_with_padding(img)
+        # New Smart Padding Logic
+        img = resize_with_smart_padding(img)
         
         buf = BytesIO()
         img.save(buf, format="JPEG", quality=90)
         buf.seek(0)
         
-        # Clean suffix for safe filenames
         clean_suffix = "".join(filter(str.isalnum, suffix))
-        
         upload_result = cloudinary.uploader.upload(
             buf, 
             public_id = f"sku_{psku}_{clean_suffix}",
@@ -82,29 +102,21 @@ def cached_process_upload(image_url, psku, suffix):
 
 # --- 2. UI LAYOUT ---
 st.set_page_config(page_title="Bulk Image Resizing", layout="wide", page_icon="🖼️")
-
 st.title("🖼️ Bulk Image Resizing")
 
-# Sidebar for instructions
 with st.sidebar:
     st.header("📖 How to use")
     st.markdown("""
     1. **Upload** your Excel or CSV.
     2. **Map** your SKU and Image columns.
     3. **Start Processing** to resize to 660x900.
-    4. **Download** the 2-sheet Excel result.
-    
-    *Note: Google Drive links must be set to 'Anyone with link can view'.*
+    4. **Smart Padding:** The tool detects the background color automatically.
     """)
 
 uploaded_file = st.file_uploader("Upload product sheet", type=["csv", "xlsx"])
 
 if uploaded_file:
-    if uploaded_file.name.endswith('.csv'):
-        df_original = pd.read_csv(uploaded_file)
-    else:
-        df_original = pd.read_excel(uploaded_file)
-    
+    df_original = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
     st.info(f"Loaded {len(df_original)} rows.")
     
     c1, c2 = st.columns(2)
@@ -115,8 +127,6 @@ if uploaded_file:
 
     if st.button("🚀 Start Processing") and url_cols:
         df_resized = df_original.copy()
-        
-        # UI Progress elements
         prog_bar = st.progress(0)
         status_txt = st.empty()
         
@@ -128,12 +138,9 @@ if uploaded_file:
             for i, row in df_original.iterrows():
                 current_sku = str(row[sku_col])
                 count += 1
-                
-                # Update UI
                 status_txt.markdown(f"**Processing {count}/{total_tasks}:** SKU `{current_sku}`")
                 prog_bar.progress(count / total_tasks)
                 
-                # Process
                 res = cached_process_upload(row[url_col], current_sku, url_col)
                 new_links.append(res)
             
@@ -147,8 +154,8 @@ if uploaded_file:
             df_resized.to_excel(writer, sheet_name='Resized Links', index=False)
         
         st.download_button(
-            label="📥 Download Result Excel",
+            label="📥 Download Results",
             data=output.getvalue(),
-            file_name="Bulk_Resized_Results.xlsx",
+            file_name="Smart_Resized_Results.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
