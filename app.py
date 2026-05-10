@@ -31,10 +31,10 @@ def detect_background_color(img):
         img = img.convert('RGB')
     w, h = img.size
     corners = [
-        img.crop((0, 0, 5, 5)),           # Top-left
-        img.crop((w-5, 0, w, 5)),         # Top-right
-        img.crop((0, h-5, 5, h)),         # Bottom-left
-        img.crop((w-5, h-5, w, h))        # Bottom-right
+        img.crop((0, 0, 5, 5)),           
+        img.crop((w-5, 0, w, 5)),         
+        img.crop((0, h-5, 5, h)),         
+        img.crop((w-5, h-5, w, h))        
     ]
     r, g, b = 0, 0, 0
     for corner in corners:
@@ -50,7 +50,7 @@ def resize_with_choice(img, mode, target_size=(660, 900)):
         bg_color = detect_background_color(img)
     elif mode == "White":
         bg_color = (255, 255, 255)
-    else:  # Black
+    else:  
         bg_color = (0, 0, 0)
     
     img.thumbnail(target_size, Image.Resampling.LANCZOS)
@@ -75,8 +75,6 @@ def cached_process_upload(image_url, psku, suffix, bg_mode):
         response.raise_for_status()
         
         img = Image.open(BytesIO(response.content))
-        
-        # Process with the user's chosen color mode
         img = resize_with_choice(img, bg_mode)
         
         buf = BytesIO()
@@ -98,7 +96,6 @@ def cached_process_upload(image_url, psku, suffix, bg_mode):
 st.set_page_config(page_title="Bulk Image Resizing", layout="wide", page_icon="🖼️")
 st.title("🖼️ Bulk Image Resizing")
 
-# Instructions
 with st.expander("📖 Instructions", expanded=False):
     st.markdown("""
     1. **Upload** Excel/CSV.
@@ -110,7 +107,11 @@ with st.expander("📖 Instructions", expanded=False):
 uploaded_file = st.file_uploader("Upload product sheet", type=["csv", "xlsx"])
 
 if uploaded_file:
-    df_original = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+    if uploaded_file.name.endswith('.csv'):
+        df_original = pd.read_csv(uploaded_file)
+    else:
+        df_original = pd.read_excel(uploaded_file)
+    
     st.info(f"Loaded {len(df_original)} rows.")
     
     col1, col2, col3 = st.columns(3)
@@ -121,5 +122,40 @@ if uploaded_file:
     with col3:
         bg_mode = st.selectbox("Background Fill Mode", ["Automatic", "White", "Black"])
 
-    if st.button("🚀 Start Processing") and url_cols:
-        # Clear cache
+    if st.button("🚀 Start Processing"):
+        if not url_cols:
+            st.error("Please select at least one image column.")
+        else:
+            df_resized = df_original.copy()
+            prog_bar = st.progress(0)
+            status_txt = st.empty()
+            
+            total_tasks = len(df_original) * len(url_cols)
+            count = 0
+            
+            for url_col in url_cols:
+                new_links = []
+                for i, row in df_original.iterrows():
+                    current_sku = str(row[sku_col])
+                    count += 1
+                    status_txt.markdown(f"**Processing {count}/{total_tasks}:** SKU `{current_sku}`")
+                    prog_bar.progress(count / total_tasks)
+                    
+                    res = cached_process_upload(row[url_col], current_sku, url_col, bg_mode)
+                    new_links.append(res)
+                
+                df_resized[url_col] = new_links
+
+            status_txt.success("✅ Finished!")
+            
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df_original.to_excel(writer, sheet_name='Original Links', index=False)
+                df_resized.to_excel(writer, sheet_name='Resized Links', index=False)
+            
+            st.download_button(
+                label="📥 Download Results",
+                data=output.getvalue(),
+                file_name=f"Resized_{bg_mode}_Results.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
