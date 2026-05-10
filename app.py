@@ -15,7 +15,7 @@ cloudinary.config(
 )
 
 def get_direct_url(url):
-    """Clean the URL and convert Google Drive sharing links to direct download links."""
+    """Clean the URL and convert Google Drive sharing links."""
     if pd.isna(url): return url
     url = str(url).strip().replace('\n', '').replace('\r', '').replace('%0A', '')
     if "drive.google.com" in url:
@@ -30,132 +30,108 @@ def detect_background_color(img):
     if img.mode != 'RGB':
         img = img.convert('RGB')
     w, h = img.size
-    corners = [
-        img.crop((0, 0, 5, 5)),           
-        img.crop((w-5, 0, w, 5)),         
-        img.crop((0, h-5, 5, h)),         
-        img.crop((w-5, h-5, w, h))        
-    ]
+    corners = [img.crop((0,0,5,5)), img.crop((w-5,0,w,5)), img.crop((0,h-5,5,h)), img.crop((w-5,h-5,w,h))]
     r, g, b = 0, 0, 0
     for corner in corners:
         stat = ImageStat.Stat(corner)
-        r += stat.mean[0]
-        g += stat.mean[1]
-        b += stat.mean[2]
+        r += stat.mean[0]; g += stat.mean[1]; b += stat.mean[2]
     return (int(r/4), int(g/4), int(b/4))
 
-def resize_with_choice(img, mode, target_size=(660, 900)):
-    """Resizes image based on the user's selected background mode."""
-    if mode == "Automatic":
-        bg_color = detect_background_color(img)
-    elif mode == "White":
-        bg_color = (255, 255, 255)
-    else:  
-        bg_color = (0, 0, 0)
-    
-    img.thumbnail(target_size, Image.Resampling.LANCZOS)
-    new_img = Image.new("RGB", target_size, bg_color)
-    paste_pos = (
-        (target_size[0] - img.size[0]) // 2,
-        (target_size[1] - img.size[1]) // 2
-    )
-    new_img.paste(img, paste_pos)
-    return new_img
-
 @st.cache_data(show_spinner=False)
-def cached_process_upload(image_url, psku, suffix, bg_mode):
+def cached_process_upload(image_url, psku, suffix, main_mode, color_choice):
     try:
         if pd.isna(image_url) or str(image_url).strip().lower() in ["", "nan", "none"]:
             return "No Link"
             
         direct_url = get_direct_url(image_url)
-        headers = {"User-Agent": "Mozilla/5.0"}
-        
-        response = requests.get(direct_url, headers=headers, timeout=20)
-        response.raise_for_status()
-        
-        img = Image.open(BytesIO(response.content))
-        img = resize_with_choice(img, bg_mode)
-        
-        buf = BytesIO()
-        img.save(buf, format="JPEG", quality=90)
-        buf.seek(0)
-        
         clean_suffix = "".join(filter(str.isalnum, suffix))
-        upload_result = cloudinary.uploader.upload(
-            buf, 
-            public_id = f"sku_{psku}_{clean_suffix}",
-            folder = "team_uploads",
-            overwrite = True
-        )
-        return upload_result.get("secure_url")
+        
+        # --- MODE 1: FULL AI REPLACEMENT ---
+        if main_mode == "Background Replacement (AI)":
+            bg_hex = "white" if color_choice == "White" else "black"
+            upload_result = cloudinary.uploader.upload(
+                direct_url, 
+                public_id = f"sku_{psku}_{clean_suffix}",
+                folder = "team_uploads",
+                overwrite = True,
+                background_removal = "cloudinary_ai", # Requires Cloudinary AI Add-on
+                transformation = [
+                    {"width": 660, "height": 900, "crop": "pad", "background": bg_hex}
+                ]
+            )
+            return upload_result.get("secure_url")
+
+        # --- MODE 2: BACKGROUND FILL (PADDING) ---
+        else:
+            response = requests.get(direct_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+            img = Image.open(BytesIO(response.content))
+            if img.mode in ("RGBA", "P"): img = img.convert("RGB")
+            
+            # Color Logic
+            if color_choice == "Automatic":
+                final_bg = detect_background_color(img)
+            elif color_choice == "White":
+                final_bg = (255, 255, 255)
+            else:
+                final_bg = (0, 0, 0)
+                
+            img.thumbnail((660, 900), Image.Resampling.LANCZOS)
+            new_img = Image.new("RGB", (660, 900), final_bg)
+            paste_pos = ((660 - img.size[0]) // 2, (900 - img.size[1]) // 2)
+            new_img.paste(img, paste_pos)
+            
+            buf = BytesIO()
+            new_img.save(buf, format="JPEG", quality=90)
+            buf.seek(0)
+            
+            upload_result = cloudinary.uploader.upload(buf, public_id=f"sku_{psku}_{clean_suffix}", folder="team_uploads", overwrite=True)
+            return upload_result.get("secure_url")
+
     except Exception as e:
         return f"Error: {str(e)}"
 
 # --- 2. UI LAYOUT ---
-st.set_page_config(page_title="Bulk Image Resizing", layout="wide", page_icon="🖼️")
+st.set_page_config(page_title="Bulk Image Resizing", layout="wide")
 st.title("🖼️ Bulk Image Resizing")
-
-with st.expander("📖 Instructions", expanded=False):
-    st.markdown("""
-    1. **Upload** Excel/CSV.
-    2. **Map Columns:** Choose SKU and Image URL columns.
-    3. **Background Mode:** Select **Automatic** to match the photo, or **White/Black** to force a color.
-    4. **Process:** Get permanent links in a new Excel file.
-    """)
 
 uploaded_file = st.file_uploader("Upload product sheet", type=["csv", "xlsx"])
 
 if uploaded_file:
-    if uploaded_file.name.endswith('.csv'):
-        df_original = pd.read_csv(uploaded_file)
-    else:
-        df_original = pd.read_excel(uploaded_file)
+    df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
     
-    st.info(f"Loaded {len(df_original)} rows.")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        sku_col = st.selectbox("SKU Column", df_original.columns)
-    with col2:
-        url_cols = st.multiselect("Image URL Column(s)", [c for c in df_original.columns if c != sku_col])
-    with col3:
-        bg_mode = st.selectbox("Background Fill Mode", ["Automatic", "White", "Black"])
+    st.subheader("Configuration")
+    c1, c2 = st.columns(2)
+    with c1:
+        sku_col = st.selectbox("SKU Column", df.columns)
+        url_cols = st.multiselect("Image Link Column(s)", [c for c in df.columns if c != sku_col])
+    with c2:
+        main_mode = st.radio("Processing Mode", ["Background Fill (Padding)", "Background Replacement (AI)"])
+        
+        color_options = ["White", "Black", "Automatic"] if main_mode == "Background Fill (Padding)" else ["White", "Black"]
+        color_choice = st.selectbox("Target Color", color_options)
 
-    if st.button("🚀 Start Processing"):
+    if st.button("🚀 Start Bulk Processing"):
         if not url_cols:
-            st.error("Please select at least one image column.")
+            st.error("Select image columns first.")
         else:
-            df_resized = df_original.copy()
-            prog_bar = st.progress(0)
-            status_txt = st.empty()
-            
-            total_tasks = len(df_original) * len(url_cols)
-            count = 0
+            df_res = df.copy()
+            pb = st.progress(0)
+            st_txt = st.empty()
+            total = len(df) * len(url_cols); count = 0
             
             for url_col in url_cols:
-                new_links = []
-                for i, row in df_original.iterrows():
-                    current_sku = str(row[sku_col])
+                links = []
+                for i, row in df.iterrows():
                     count += 1
-                    status_txt.markdown(f"**Processing {count}/{total_tasks}:** SKU `{current_sku}`")
-                    prog_bar.progress(count / total_tasks)
-                    
-                    res = cached_process_upload(row[url_col], current_sku, url_col, bg_mode)
-                    new_links.append(res)
-                
-                df_resized[url_col] = new_links
+                    st_txt.markdown(f"**Processing {count}/{total}:** SKU `{row[sku_col]}`")
+                    pb.progress(count / total)
+                    links.append(cached_process_upload(row[url_col], row[sku_col], url_col, main_mode, color_choice))
+                df_res[url_col] = links
 
-            status_txt.success("✅ Finished!")
-            
+            st.success("✅ Done!")
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df_original.to_excel(writer, sheet_name='Original Links', index=False)
-                df_resized.to_excel(writer, sheet_name='Resized Links', index=False)
+                df.to_excel(writer, sheet_name='Original Links', index=False)
+                df_res.to_excel(writer, sheet_name='Resized Links', index=False)
             
-            st.download_button(
-                label="📥 Download Results",
-                data=output.getvalue(),
-                file_name=f"Resized_{bg_mode}_Results.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            st.download_button("📥 Download Results", output.getvalue(), f"Resized_{color_choice}.xlsx")
