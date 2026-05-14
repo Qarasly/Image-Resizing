@@ -70,23 +70,3 @@ st.title("🖼️ Bulk Image Resizing Pro")
 with st.container(border=True):
     st.subheader("⚙️ Step 1: Configuration")
     s1, s2, s3 = st.columns([1, 1.2, 1.2])
-    
-    with s1:
-        st.write("**Dimensions**")
-        target_w = st.number_input("Width (px)", min_value=10, value=660)
-        target_h = st.number_input("Height (px)", min_value=10, value=900)
-        st.info("💡 Recommended for NIS: 660 x 900")
-    
-    with s2:
-        st.write("**I/O Options**")
-        input_mode = st.selectbox("Input Source", ["Links (Excel/CSV Sheet)", "Local Image Files"])
-        output_mode = st.selectbox("Output Format", ["Links (Excel Sheet)", "Images (ZIP File)"])
-        bg_mode = st.toggle("AI Background Replacement", help="Removes background using Cloudinary AI.")
-
-    with s3:
-        st.write("**Background Color**")
-        color_type = st.radio("Style:", ["Standard White", "Automatic (Match Image)", "Custom Color"], horizontal=True)
-        
-        if color_type == "Custom Color":
-            hex_color = st.color_picker("Pick color", "#FFFFFF")
-            final_color_rgb = hex_to_rgb(hex_color
