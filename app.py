@@ -9,6 +9,7 @@ import re
 import zipfile
 
 # --- 1. CONFIGURATION ---
+# Permanent Cloudinary Credentials
 cloudinary.config(
     cloud_name = "djhyyziqe",
     api_key = "973845594791418",
@@ -18,8 +19,10 @@ cloudinary.config(
 # --- HELPER FUNCTIONS ---
 def get_direct_url(url):
     if pd.isna(url): return url
+    # Clean hidden characters, newlines, and spaces
     url = str(url).strip().replace('\n', '').replace('\r', '').replace('%0A', '')
     if "drive.google.com" in url:
+        # Improved Regex for Google Drive IDs
         match = re.search(r"/d/([a-zA-Z0-9_-]{25,})", url)
         if match:
             file_id = match.group(1)
@@ -27,6 +30,7 @@ def get_direct_url(url):
     return url
 
 def detect_background_color(img):
+    """Samples corners of the image to find the average edge color."""
     if img.mode != 'RGB': img = img.convert('RGB')
     w, h = img.size
     corners = [img.crop((0,0,5,5)), img.crop((w-5,0,w,5)), img.crop((0,h-5,5,h)), img.crop((w-5,h-5,w,h))]
@@ -41,7 +45,7 @@ def hex_to_rgb(hex_str):
     return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
 
 def process_image_logic(img, tw, th, final_color):
-    """Resizes image with specific RGB padding."""
+    """Resizes image into a canvas of a specific color without stretching."""
     if img.mode in ("RGBA", "P"): img = img.convert("RGB")
     
     img.thumbnail((tw, th), Image.Resampling.LANCZOS)
@@ -49,6 +53,22 @@ def process_image_logic(img, tw, th, final_color):
     paste_pos = ((tw - img.size[0]) // 2, (th - img.size[1]) // 2)
     new_img.paste(img, paste_pos)
     return new_img
+
+@st.cache_data(show_spinner=False)
+def cached_cloud_upload(src, psku, suffix, bg_mode, tw, th, cloudinary_bg):
+    """Handles the Cloudinary upload with transformations."""
+    try:
+        res = cloudinary.uploader.upload(
+            src,
+            public_id = f"sku_{psku}_{suffix}",
+            folder = "team_uploads",
+            overwrite = True,
+            background_removal = "cloudinary_ai" if bg_mode else None,
+            transformation = [{"width": tw, "height": th, "crop": "pad", "background": cloudinary_bg}]
+        )
+        return res.get("secure_url")
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 # --- 2. UI LAYOUT ---
 st.set_page_config(page_title="Bulk Image Resizing", layout="wide")
@@ -63,33 +83,33 @@ with st.container(border=True):
         st.write("**Dimensions**")
         target_w = st.number_input("Width (px)", min_value=10, value=660)
         target_h = st.number_input("Height (px)", min_value=10, value=900)
-        st.caption("💡 Recommended for NIS: 660 x 900")
+        st.info("💡 Recommended for NIS: 660 x 900")
     
     with s2:
         st.write("**I/O Options**")
         input_mode = st.selectbox("Input Source", ["Links (Excel/CSV Sheet)", "Local Image Files"])
         output_mode = st.selectbox("Output Format", ["Links (Excel Sheet)", "Images (ZIP File)"])
-        bg_mode = st.toggle("AI Background Replacement", help="Removes original background. Uses Cloudinary credits.")
+        bg_mode = st.toggle("AI Background Replacement", help="Removes original background using Cloudinary AI.")
 
     with s3:
         st.write("**Background Color**")
-        # Easy Selector for the team
         color_type = st.radio(
-            "Choose Background Style:",
+            "Choose Style:",
             ["Standard White", "Automatic (Match Image)", "Custom Color"],
             horizontal=True
         )
         
-        final_color_rgb = (255, 255, 255) # Default
-        
         if color_type == "Custom Color":
-            hex_color = st.color_picker("Pick a brand color", "#FFFFFF")
+            hex_color = st.color_picker("Pick brand color", "#FFFFFF")
             final_color_rgb = hex_to_rgb(hex_color)
+            cloudinary_bg = f"rgb:{hex_color.lstrip('#')}"
         elif color_type == "Standard White":
             final_color_rgb = (255, 255, 255)
-        elif color_type == "Automatic (Match Image)":
-            st.info("✨ AI will sample the image edges.")
+            cloudinary_bg = "white"
+        else: # Automatic
+            st.info("✨ Edge-sampling AI enabled.")
             final_color_rgb = "AUTO"
+            cloudinary_bg = "auto"
 
 st.divider()
 
@@ -101,32 +121,79 @@ if input_mode == "Links (Excel/CSV Sheet)":
     if uploaded_file:
         df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
         c1, c2 = st.columns(2)
-        with c1: sku_col = st.selectbox("SKU/Barcode Column", df.columns)
-        with c2: url_cols = st.multiselect("Image Link Columns", [c for c in df.columns if c != sku_col])
+        with c1: sku_col = st.selectbox("Select SKU Column", df.columns)
+        with c2: url_cols = st.multiselect("Select URL Column(s)", [c for c in df.columns if c != sku_col])
         if url_cols:
             for _, row in df.iterrows():
                 for col in url_cols:
-                    data_to_process.append({"sku": str(row[sku_col]), "content": row[col], "col_name": col, "row_idx": _})
+                    data_to_process.append({"sku": str(row[sku_col]), "content": row[col], "col_name": col, "row_idx": _, "type": "url"})
 
 else:
-    uploaded_imgs = st.file_uploader("Upload Images (No Limit)", type=["jpg", "png", "webp"], accept_multiple_files=True)
+    uploaded_imgs = st.file_uploader("Upload Images (Unlimited)", type=["jpg", "png", "webp"], accept_multiple_files=True)
     if uploaded_imgs:
         for img_file in uploaded_imgs:
-            data_to_process.append({"sku": img_file.name.split('.')[0], "content": Image.open(img_file), "col_name": "uploaded", "filename": img_file.name})
+            data_to_process.append({"sku": img_file.name.split('.')[0], "content": Image.open(img_file), "col_name": "file", "filename": img_file.name, "type": "file"})
 
 # --- EXECUTION ---
-if st.button("🚀 Run Bulk Process") and data_to_process:
+if st.button("🚀 Start Bulk Process") and data_to_process:
     pb = st.progress(0)
     st_txt = st.empty()
     total = len(data_to_process)
     
+    # OUTPUT: EXCEL SHEET
     if output_mode == "Links (Excel Sheet)":
         results_df = df.copy() if input_mode == "Links (Excel/CSV Sheet)" else pd.DataFrame([{"SKU": i['sku']} for i in data_to_process])
         
         for i, item in enumerate(data_to_process):
-            st_txt.text(f"Processing Cloud Upload: {i+1}/{total}")
-            try:
-                # Prepare Image Source
-                if isinstance(item['content'], Image.Image):
-                    # For File -> Link mode, we process color locally then upload
-                    current_color
+            st_txt.text(f"Processing Cloud Upload {i+1}/{total}: {item['sku']}")
+            
+            if item['type'] == "file":
+                # For File -> Link, we resize locally first if not using AI BG removal
+                current_color = detect_background_color(item['content']) if final_color_rgb == "AUTO" else final_color_rgb
+                processed = process_image_logic(item['content'], target_w, target_h, current_color)
+                buf = BytesIO(); processed.save(buf, format="JPEG"); buf.seek(0)
+                src = buf
+            else:
+                src = get_direct_url(item['content'])
+            
+            res_link = cached_cloud_upload(src, item['sku'], item['col_name'], bg_mode, target_w, target_h, cloudinary_bg)
+            
+            if input_mode == "Links (Excel/CSV Sheet)":
+                results_df.at[item['row_idx'], item['col_name']] = res_link
+            else:
+                results_df.at[i, "Resized_Link"] = res_link
+            
+            pb.progress((i + 1) / total)
+
+        st.success("✅ Sheet Completed!")
+        out_excel = BytesIO()
+        with pd.ExcelWriter(out_excel, engine='openpyxl') as writer:
+            results_df.to_excel(writer, index=False)
+        st.download_button("📥 Download Excel Sheet", out_excel.getvalue(), "processed_catalog.xlsx")
+
+    # OUTPUT: ZIP FILE
+    else:
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zip_f:
+            for i, item in enumerate(data_to_process):
+                st_txt.text(f"Processing File {i+1}/{total}: {item['sku']}")
+                try:
+                    if item['type'] == "file":
+                        img = item['content']
+                    else:
+                        resp = requests.get(get_direct_url(item['content']), timeout=15)
+                        img = Image.open(BytesIO(resp.content))
+                    
+                    current_color = detect_background_color(img) if final_color_rgb == "AUTO" else final_color_rgb
+                    processed = process_image_logic(img, target_w, target_h, current_color)
+                    
+                    img_buf = BytesIO()
+                    processed.save(img_buf, format="JPEG", quality=90)
+                    fname = f"{item['sku']}_{i}.jpg"
+                    zip_f.writestr(fname, img_buf.getvalue())
+                except Exception as e:
+                    st.error(f"Failed image {item['sku']}: {e}")
+                pb.progress((i + 1) / total)
+        
+        st.success("✅ ZIP File Completed!")
+        st.download_button("📥 Download ZIP of Images", zip_buffer.getvalue(), "resized_images.zip")
