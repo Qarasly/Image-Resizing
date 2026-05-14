@@ -89,34 +89,4 @@ with st.container(border=True):
         
         if color_type == "Custom Color":
             hex_color = st.color_picker("Pick color", "#FFFFFF")
-            final_color_rgb = hex_to_rgb(hex_color)
-            cloudinary_bg = f"rgb:{hex_color.lstrip('#')}"
-        elif color_type == "Standard White":
-            final_color_rgb = (255, 255, 255)
-            cloudinary_bg = "white"
-        else:
-            final_color_rgb = "AUTO"
-            cloudinary_bg = "auto"
-
-st.divider()
-
-# --- DATA PREPARATION ---
-data_to_process = []
-df_original = None
-
-if input_mode == "Links (Excel/CSV Sheet)":
-    uploaded_file = st.file_uploader("Upload Sheet", type=["csv", "xlsx"])
-    if uploaded_file:
-        df_original = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-        c1, c2 = st.columns(2)
-        with c1: sku_col = st.selectbox("Select SKU Column", df_original.columns)
-        with c2: url_cols = st.multiselect("Select URL Column(s)", [c for c in df_original.columns if c != sku_col])
-        if url_cols:
-            for idx, row in df_original.iterrows():
-                for col in url_cols:
-                    data_to_process.append({"sku": str(row[sku_col]), "content": row[col], "col_name": col, "row_idx": idx, "type": "url"})
-else:
-    uploaded_imgs = st.file_uploader("Upload Images", type=["jpg", "png", "webp"], accept_multiple_files=True)
-    if uploaded_imgs:
-        for img_file in uploaded_imgs:
-            psku_name = img_file.name.
+            final_color_rgb = hex_to_rgb(hex_color
