@@ -100,71 +100,23 @@ with st.container(border=True):
 
 st.divider()
 
-# --- DATA PREP ---
+# --- DATA PREPARATION ---
 data_to_process = []
+df_original = None
 
 if input_mode == "Links (Excel/CSV Sheet)":
     uploaded_file = st.file_uploader("Upload Sheet", type=["csv", "xlsx"])
     if uploaded_file:
-        df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+        df_original = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
         c1, c2 = st.columns(2)
-        with c1: sku_col = st.selectbox("Select SKU Column", df.columns)
-        with c2: url_cols = st.multiselect("Select URL Column(s)", [c for c in df.columns if c != sku_col])
+        with c1: sku_col = st.selectbox("Select SKU Column", df_original.columns)
+        with c2: url_cols = st.multiselect("Select URL Column(s)", [c for c in df_original.columns if c != sku_col])
         if url_cols:
-            for _, row in df.iterrows():
+            for idx, row in df_original.iterrows():
                 for col in url_cols:
-                    data_to_process.append({"sku": str(row[sku_col]), "content": row[col], "col_name": col, "row_idx": _, "type": "url"})
-
+                    data_to_process.append({"sku": str(row[sku_col]), "content": row[col], "col_name": col, "row_idx": idx, "type": "url"})
 else:
     uploaded_imgs = st.file_uploader("Upload Images", type=["jpg", "png", "webp"], accept_multiple_files=True)
     if uploaded_imgs:
         for img_file in uploaded_imgs:
-            # Use filename without extension as the PSKU
-            psku_name = img_file.name.rsplit('.', 1)[0]
-            data_to_process.append({"sku": psku_name, "content": Image.open(img_file), "col_name": "file", "filename": img_file.name, "type": "file"})
-
-# --- EXECUTION ---
-if st.button("🚀 Start Bulk Process") and data_to_process:
-    pb = st.progress(0)
-    st_txt = st.empty()
-    total = len(data_to_process)
-    
-    if output_mode == "Links (Excel Sheet)":
-        # SPECIAL LOGIC: If input was files, create a fresh 2-column dataframe
-        if input_mode == "Local Image Files":
-            results_df = pd.DataFrame(columns=["psku", "resized_link"])
-        else:
-            results_df = df.copy()
-        
-        for i, item in enumerate(data_to_process):
-            st_txt.text(f"Processing {i+1}/{total}: {item['sku']}")
-            
-            if item['type'] == "file":
-                current_color = detect_background_color(item['content']) if final_color_rgb == "AUTO" else final_color_rgb
-                processed = process_image_logic(item['content'], target_w, target_h, current_color)
-                buf = BytesIO(); processed.save(buf, format="JPEG"); buf.seek(0)
-                src = buf
-            else:
-                src = get_direct_url(item['content'])
-            
-            res_link = cached_cloud_upload(src, item['sku'], item['col_name'], bg_mode, target_w, target_h, cloudinary_bg)
-            
-            if input_mode == "Local Image Files":
-                # Add a new row for each file
-                results_df.loc[len(results_df)] = [item['sku'], res_link]
-            else:
-                results_df.at[item['row_idx'], item['col_name']] = res_link
-            
-            pb.progress((i + 1) / total)
-
-        st.success("✅ Excel Sheet Ready!")
-        out_excel = BytesIO()
-        with pd.ExcelWriter(out_excel, engine='openpyxl') as writer:
-            results_df.to_excel(writer, index=False)
-        st.download_button("📥 Download Results", out_excel.getvalue(), "Resized_Links_Output.xlsx")
-
-    else:
-        # ZIP FILE Logic remains the same
-        zip_buffer = BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w") as zip_f:
-            for i, item in enumerate(data_to_process):
+            psku_name = img_file.name.
