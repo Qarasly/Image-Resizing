@@ -73,9 +73,7 @@ def generate_dynamic_content(img, selected_fields, mapping_context=""):
         return {}
         
     client = genai.Client(api_key=GEMINI_API_KEY)
-    
-    # Construct a schema dynamically based on what the user checked
-    fields_schema = {field: f"Value/content generated specifically for {field}" for field in selected_fields}
+    fields_schema = {field: f"Value generated for {field}" for field in selected_fields}
     
     prompt = f"""
     You are an e-commerce catalog AI. Analyze this product image.
@@ -95,8 +93,9 @@ def generate_dynamic_content(img, selected_fields, mapping_context=""):
             contents=[img, prompt]
         )
         raw = response.text.strip()
-        if raw.startswith("
+        # Clean up code blocks safely without breaking strings
+        if raw.startswith("```"):
+            raw = re.sub(r"^
 http://googleusercontent.com/immersive_entry_chip/0
-http://googleusercontent.com/immersive_entry_chip/1
 
-Push this to GitHub, click **Reboot App** on your Streamlit Cloud platform, and you will have your fully custom, Row 8 tab-selectable catalog wizard!
+Once you commit this clean file to your main branch, trigger a fresh **Reboot app** on the dashboard. This completely eliminates the formatting string syntax error!
