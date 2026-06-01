@@ -9,6 +9,7 @@ import base64
 from rembg import remove
 import json
 import openpyxl
+import time
 from google import genai
 
 # --- 1. SECURE CONFIGURATION ---
@@ -69,7 +70,7 @@ def upload_to_imgbb(img_buffer, psku):
     return res.json()["data"]["url"]
 
 def generate_dynamic_content(img, selected_fields, mapping_context=""):
-    """Sends the image, user chosen fields, and mapping tab data to Gemini."""
+    """Sends the image, fields, and mapping data to Gemini with an auto-retry loop for 503 errors."""
     if not GEMINI_API_KEY:
         return {}
         
@@ -88,22 +89,31 @@ def generate_dynamic_content(img, selected_fields, mapping_context=""):
     Provide accurate information. Return ONLY the raw JSON object. Do not wrap it in markdown code blocks or triple backticks.
     """
     
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[img, prompt]
-        )
-        raw = response.text.strip()
-        
-        # We define backticks dynamically using chr(96) to avoid syntax issues during code rendering
-        backticks = chr(96) * 3
-        if raw.startswith(backticks):
-            raw = re.sub(r"^" + re.escape(backticks) + r"(?:json)?\s*", "", raw)
-            raw = re.sub(r"\s*" + re.escape(backticks) + r"$", "", raw)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=[img, prompt]
+            )
+            raw = response.text.strip()
             
-        return json.loads(raw.strip())
-    except Exception as e:
-        return {field: f"AI Error: {str(e)}" for field in selected_fields}
+            backticks = chr(96) * 3
+            if raw.startswith(backticks):
+                raw = re.sub(r"^" + re.escape(backticks) + r"(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*" + re.escape(backticks) + r"$", "", raw)
+                
+            return json.loads(raw.strip())
+            
+        except Exception as e:
+            # If it's a 503 high demand error, wait and try again
+            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                if attempt < max_retries - 1:
+                    time.sleep(2 + attempt * 2) # Wait 2 seconds on 1st fail, 4 seconds on 2nd fail
+                    continue
+            return {field: f"AI Error: {str(e)}" for field in selected_fields}
+            
+    return {field: "AI Error: Server busy after multiple retries" for field in selected_fields}
 
 @st.cache_data(show_spinner=False)
 def process_url_full(src_url, psku, tw, th, final_color_rgb, bg_mode):
