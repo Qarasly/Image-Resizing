@@ -10,13 +10,13 @@ import streamlit as st
 from PIL import Image, ImageOps, ImageStat
 
 # --- 1. CONFIGURATION ---
-cloudinary.config(
-    cloud_name="djhyyziqe",
-    api_key="973845594791418",
-    api_secret="euyVjoIFQIad1_7MHScPdu9cpzk",
-)
-
-
+# Safely pull the API key from Streamlit's encrypted secrets vault
+try:
+    IMGBB_API_KEY = st.secrets["IMGBB_API_KEY"]
+except KeyError:
+    st.error("🚨 API Key missing! Please add IMGBB_API_KEY to your Streamlit Secrets.")
+    st.stop()
+    
 # --- HELPER FUNCTIONS ---
 def get_direct_url(url):
   if pd.isna(url):
