@@ -1,6 +1,6 @@
 streamlit
 pandas
-cloudinary
-Pillow
 requests
 openpyxl
+Pillow
+rembg
