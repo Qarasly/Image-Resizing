@@ -8,7 +8,6 @@ import zipfile
 import base64
 from rembg import remove
 import json
-import openpyxl
 import time
 from google import genai
 
@@ -69,24 +68,22 @@ def upload_to_imgbb(img_buffer, psku):
     res.raise_for_status()
     return res.json()["data"]["url"]
 
-def generate_dynamic_content(img, selected_fields, mapping_context=""):
-    """Sends the image, fields, and mapping data to Gemini with an auto-retry loop for 503 errors."""
+def generate_product_info(img):
+    """Passes the image to Gemini to extract fixed standard catalog columns."""
     if not GEMINI_API_KEY:
         return {}
         
     client = genai.Client(api_key=GEMINI_API_KEY)
-    fields_schema = {field: f"Value generated for {field}" for field in selected_fields}
     
-    prompt = f"""
-    You are an e-commerce catalog AI. Analyze this product image.
-    
-    Here is the global background mapping rules/context for this project:
-    {mapping_context}
-    
-    Based on the image and context, fill out the following requested fields and return them as a valid JSON object matching this exact structure:
-    {json.dumps(fields_schema, indent=2)}
-    
-    Provide accurate information. Return ONLY the raw JSON object. Do not wrap it in markdown code blocks or triple backticks.
+    prompt = """
+    Analyze this product image. Provide the following information in a valid JSON object:
+    {
+      "product_name": "A professional and catchy name for this product",
+      "product_type": "The main category (e.g., Apparel, Electronics, Home Goods, Furniture)",
+      "product_subtype": "The specific sub-category (e.g., V-Neck T-Shirt, Wireless Headphones, Sofa)",
+      "description": "A compelling product description ready for an e-commerce website (2-3 sentences)."
+    }
+    Provide accurate information. Return ONLY the raw JSON object. Do not wrap it in markdown code blocks.
     """
     
     max_retries = 3
@@ -110,137 +107,64 @@ def generate_dynamic_content(img, selected_fields, mapping_context=""):
                 if attempt < max_retries - 1:
                     time.sleep(2 + attempt * 2)
                     continue
-            return {field: f"AI Error: {str(e)}" for field in selected_fields}
+            return {"error": f"AI Error: {str(e)}"}
             
-    return {field: "AI Error: Server busy after multiple retries" for field in selected_fields}
-
-@st.cache_data(show_spinner=False)
-def process_url_full(src_url, psku, tw, th, final_color_rgb, bg_mode):
-    try:
-        resp = requests.get(get_direct_url(src_url), timeout=15)
-        resp.raise_for_status()
-        raw_img = Image.open(BytesIO(resp.content))
-        proc_img = process_image_pipeline(raw_img, tw, th, final_color_rgb, bg_mode)
-        
-        buf = BytesIO(); proc_img.save(buf, format="JPEG", quality=90); buf.seek(0)
-        link = upload_to_imgbb(buf, psku)
-        return proc_img, link
-    except Exception as e:
-        return None, f"Error: {str(e)}"
+    return {"error": "AI Error: Server busy after multiple retries"}
 
 # --- 2. UI LAYOUT ---
-st.set_page_config(page_title="Bulk Resizing & Dynamic AI", layout="wide")
-st.title("🏭 Bulk Image Studio & Template-Driven AI")
+st.set_page_config(page_title="Catalog Studio", layout="wide")
+st.title("🏭 Catalog Studio")
 
-# STEP 1: GLOBAL CONFIG
+st.markdown("### 🛠️ Step 1: Select Your Workflow")
+tool_mode = st.radio(
+    "Active Mode:", 
+    ["🖼️ Image Resizer Only", "✨ AI Content Generation (Includes Resizer)"],
+    horizontal=True
+)
+
+# AI mode inherently requires and includes the resizer for a clean image background
+use_resizer = True 
+use_ai = "AI" in tool_mode
+
+# --- CONDITIONAL UI BLOCKS ---
+
 with st.container(border=True):
-    st.subheader("⚙️ Step 1: Mode & Image Configuration")
-    s1, s2, s3 = st.columns([3, 4, 4])
-    
+    st.subheader("⚙️ Image Resizer Configuration")
+    s1, s2 = st.columns(2)
     with s1:
-        st.write("**Task Features**")
-        use_resizer = st.checkbox("Run Image Resizer & Padding", value=True)
-        use_ai_content = st.checkbox("Run Gemini AI Content Generation", value=False)
-        
-        if not use_resizer and not use_ai_content:
-            st.warning("⚠️ Please choose at least one option above to continue.")
-            
+        target_w = st.number_input("Width (px)", min_value=10, value=660)
+        target_h = st.number_input("Height (px)", min_value=10, value=900)
+        bg_mode = st.toggle("AI Background Removal (rembg)", value=False, help="Isolates the product image.")
     with s2:
-        st.write("**Processing Options**")
-        input_mode = st.selectbox("Input Source", ["Links (Excel/CSV Sheet)", "Local Image Files"])
-        output_mode = st.selectbox("Output Format", ["Links (Excel Sheet)", "Images (ZIP File)"])
-        bg_mode = st.toggle("AI Background Removal (rembg)", value=False, disabled=not use_resizer, help="Isolates the product image.")
-        
-    with s3:
         st.write("**Canvas Background Fill**")
-        color_type = st.radio("Style:", ["Standard White", "Automatic (Match Image)", "Custom Color"], horizontal=True, disabled=not use_resizer)
+        color_type = st.radio("Style:", ["Standard White", "Automatic (Match Image)", "Custom Color"], horizontal=True)
         if color_type == "Custom Color": 
             final_color_rgb = hex_to_rgb(st.color_picker("Pick color", "#FFFFFF"))
         elif color_type == "Standard White": 
             final_color_rgb = (255, 255, 255)
         else: 
             final_color_rgb = "AUTO"
-            
-        target_w, target_h = 660, 900
-        if use_resizer:
-            with st.expander("Adjust Dimensions"):
-                target_w = st.number_input("Width (px)", min_value=10, value=660)
-                target_h = st.number_input("Height (px)", min_value=10, value=900)
 
-# STEP 1B: MANDATORY AI DISCLAIMER SCREEN
 ai_liability_accepted = False
-if use_ai_content:
+if use_ai:
     with st.container(border=True):
-        st.markdown("<h4 style='color: #d9534f;'>⚠️ Mandatory AI Liability & Accuracy Disclaimer</h4>", unsafe_allow_html=True)
-        st.info(
-            "**Please Note:** AI model outputs are generated algorithmically. Gemini AI might occasionally produce "
-            "inaccurate or mismatched classifications regarding categories, subtypes, or structural attributes. "
-            "All generated metrics must be manually checked by an administrator prior to production use."
-        )
+        st.subheader("🤖 AI Content Configuration")
+        st.info("The AI will analyze the image and generate 4 columns: Name, Type, Subtype, and Description.")
+        st.markdown("<h5 style='color: #d9534f;'>⚠️ Mandatory AI Liability & Accuracy Disclaimer</h5>", unsafe_allow_html=True)
         ai_liability_accepted = st.checkbox(
-            "I acknowledge that using this automated content generation is entirely at our own risk. "
-            "Our operational team accepts full responsibility for confirming the factual accuracy of all final data.",
+            "I acknowledge that AI models may produce inaccurate text. "
+            "Our team accepts full responsibility for verifying the generated content before use.",
             value=False
         )
 
-# STEP 2: TEMPLATE HANDLING (THE BRAIN FILE)
-mapping_context_str = ""
-selected_ai_fields = []
-template_headers = []
-sku_header_col = None
-link_header_col = None
-content_tab = None
-
-with st.container(border=True):
-    st.subheader("📋 Step 2: Template & Mapping Configuration (Row 8 Headers)")
-    template_file = st.file_uploader("Upload Blueprint/Mapping Excel Sheet", type=["xlsx"])
-    
-    if template_file:
-        xl = pd.ExcelFile(template_file)
-        tab_names = xl.sheet_names
-        
-        t1, t2 = st.columns(2)
-        with t1:
-            mapping_tab = st.selectbox("Select the **Mapping Rules** tab:", tab_names, index=0 if len(tab_names) > 0 else 0)
-        with t2:
-            content_tab = st.selectbox("Select the **Content Target** tab:", tab_names, index=1 if len(tab_names) > 1 else 0)
-            
-        try:
-            df_mapping = pd.read_excel(template_file, sheet_name=mapping_tab, skiprows=7)
-            mapping_context_str = df_mapping.to_string(index=False, max_rows=20)
-            st.success("✅ Mapping rules scanned successfully from Row 8.")
-        except Exception as e:
-            st.error(f"Error reading Mapping tab on Row 8: {e}")
-            
-        try:
-            temp_wb = openpyxl.load_workbook(template_file, read_only=True)
-            if content_tab in temp_wb.sheetnames:
-                temp_ws = temp_wb[content_tab]
-                template_headers = [cell.value for cell in temp_ws[8] if cell.value is not None]
-                template_headers = [str(h).strip() for h in template_headers if not str(h).startswith("Unnamed:")]
-                
-                if template_headers:
-                    m1, m2 = st.columns(2)
-                    with m1:
-                        sku_header_col = st.selectbox("Which column is the **SKU / PSKU**?", template_headers)
-                    with m2:
-                        link_header_col = st.selectbox("Which column should receive the **Resized Image Link**?", ["None"] + template_headers, disabled=not use_resizer)
-                    
-                    if use_ai_content:
-                        available_ai_headers = [h for h in template_headers if h != sku_header_col and h != link_header_col]
-                        selected_ai_fields = st.multiselect("🎯 **Select columns you want Gemini AI to generate:**", available_ai_headers)
-                else:
-                    st.warning("No valid column headers found on Row 8 of the Content tab.")
-            temp_wb.close()
-        except Exception as e:
-            st.error(f"Could not parse Row 8 headers from Content tab: {e}")
-
 st.divider()
 
-if use_ai_content and not GEMINI_API_KEY and selected_ai_fields:
-    st.warning("⚠️ You selected AI Content generation, but your GEMINI_API_KEY is missing from Secrets.")
+# --- INPUT PREPARATION ---
+st.markdown("### 📂 Step 2: Upload Target Data")
+i1, i2 = st.columns(2)
+with i1: input_mode = st.selectbox("Input Source", ["Links (Excel/CSV Sheet)", "Local Image Files"])
+with i2: output_mode = st.selectbox("Output Format", ["Links (Excel Sheet)", "Images (ZIP File)"])
 
-# --- DATA TARGET INPUT PREPARATION ---
 data_to_process = []
 df_original = None
 
@@ -261,18 +185,10 @@ else:
         for img_file in uploaded_imgs:
             data_to_process.append({"sku": img_file.name.rsplit('.', 1)[0], "content": Image.open(img_file), "col_name": "file", "type": "file"})
 
-# --- VALIDATE AND RUN ---
+# --- EXECUTION LOOP ---
 if st.button("🚀 Start Production Loop") and data_to_process:
-    if not use_resizer and not use_ai_content:
-        st.error("🚨 You must tick either the Resizer or Content generation to execute a loop.")
-        st.stop()
-        
-    if use_ai_content and not ai_liability_accepted:
-        st.error("🚨 Execution Blocked: You must read and check the mandatory AI Liability & Accuracy Disclaimer box to run content features.")
-        st.stop()
-        
-    if output_mode == "Links (Excel Sheet)" and not template_file:
-        st.error("🚨 Please upload a Template Blueprint Sheet first to map the output columns.")
+    if use_ai and not ai_liability_accepted:
+        st.error("🚨 Execution Blocked: You must read and check the AI Liability Disclaimer box to use content features.")
         st.stop()
         
     pb = st.progress(0)
@@ -280,64 +196,44 @@ if st.button("🚀 Start Production Loop") and data_to_process:
     total = len(data_to_process)
     
     if output_mode == "Links (Excel Sheet)":
-        template_file.seek(0)
-        wb = openpyxl.load_workbook(template_file)
-        ws = wb[content_tab]
-        
-        header_map = {}
-        for col_idx in range(1, ws.max_column + 1):
-            val = ws.cell(row=8, column=col_idx).value
-            if val:
-                header_map[str(val).strip()] = col_idx
-                
-        sku_col_index = header_map.get(sku_header_col)
-        link_col_index = header_map.get(link_header_col) if link_header_col != "None" else None
-        
-        if not sku_col_index:
-            st.error(f"Could not locate the SKU column '{sku_header_col}' on Row 8 of your template.")
-            st.stop()
+        results_df = df_original.copy() if input_mode == "Links (Excel/CSV Sheet)" else pd.DataFrame(columns=["psku"])
             
         for i, item in enumerate(data_to_process):
             st_txt.text(f"Processing Loop {i+1}/{total}: {item['sku']}")
             try:
-                proc_img, res_link = None, None
+                proc_img = None
                 
-                if use_resizer:
-                    if item['type'] == "file":
-                        proc_img = process_image_pipeline(item['content'], target_w, target_h, final_color_rgb, bg_mode)
-                        buf = BytesIO(); proc_img.save(buf, format="JPEG", quality=90); buf.seek(0)
-                        res_link = upload_to_imgbb(buf, item['sku'])
-                    else:
-                        proc_img, res_link = process_url_full(item['content'], item['sku'], target_w, target_h, final_color_rgb, bg_mode)
+                # Fetch Raw Image
+                if item['type'] == "file":
+                    raw_img = item['content']
                 else:
-                    if item['type'] == "file":
-                        proc_img = item['content']
-                    else:
-                        resp = requests.get(get_direct_url(item['content']), timeout=15)
-                        proc_img = Image.open(BytesIO(resp.content))
+                    resp = requests.get(get_direct_url(item['content']), timeout=15)
+                    raw_img = Image.open(BytesIO(resp.content))
+
+                # Resizer Execution (Always runs as the base canvas for both modes)
+                proc_img = process_image_pipeline(raw_img, target_w, target_h, final_color_rgb, bg_mode)
+                buf = BytesIO()
+                proc_img.save(buf, format="JPEG", quality=90)
+                buf.seek(0)
+                res_link = upload_to_imgbb(buf, item['sku'])
                 
-                target_row = None
-                for row_idx in range(9, ws.max_row + 1):
-                    cell_val = str(ws.cell(row=row_idx, column=sku_col_index).value).strip()
-                    if cell_val == str(item['sku']).strip():
-                        target_row = row_idx
-                        break
-                        
-                if not target_row:
-                    target_row = ws.max_row + 1
-                    ws.cell(row=target_row, column=sku_col_index, value=item['sku'])
-                    
-                if use_resizer and link_col_index:
-                    ws.cell(row=target_row, column=link_col_index, value=res_link)
+                # Save links
+                target_idx = i if input_mode == "Local Image Files" else item['row_idx']
+                if input_mode == "Local Image Files":
+                    results_df.at[target_idx, "psku"] = item['sku']
+                results_df.at[target_idx, "Resized Link"] = res_link
                 
-                if use_ai_content and selected_ai_fields and GEMINI_API_KEY and proc_img:
+                # AI Content Execution
+                if use_ai and GEMINI_API_KEY:
                     st_txt.text(f"🤖 Gemini analyzing product {i+1}/{total}: {item['sku']}")
-                    ai_outputs = generate_dynamic_content(proc_img, selected_ai_fields, mapping_context_str)
+                    ai_outputs = generate_product_info(proc_img)
                     
-                    for field in selected_ai_fields:
-                        field_col_idx = header_map.get(field)
-                        if field_col_idx:
-                            ws.cell(row=target_row, column=field_col_idx, value=ai_outputs.get(field, ""))
+                    results_df.at[target_idx, "Generated Name"] = ai_outputs.get("product_name", "")
+                    results_df.at[target_idx, "Generated Type"] = ai_outputs.get("product_type", "")
+                    results_df.at[target_idx, "Generated Subtype"] = ai_outputs.get("product_subtype", "")
+                    results_df.at[target_idx, "Generated Description"] = ai_outputs.get("description", "")
+                    if "error" in ai_outputs:
+                        results_df.at[target_idx, "AI Diagnostics"] = ai_outputs.get("error")
                             
             except Exception as e: 
                 st.error(f"Error on {item['sku']}: {e}")
@@ -345,26 +241,26 @@ if st.button("🚀 Start Production Loop") and data_to_process:
 
         st.success("✅ Automation completed successfully!")
         out_excel = BytesIO()
-        wb.save(out_excel)
-        st.download_button("📥 Download Populated Workbook", out_excel.getvalue(), "Completed_Catalog_Template.xlsx")
+        with pd.ExcelWriter(out_excel, engine='openpyxl') as writer:
+            results_df.to_excel(writer, index=False)
+        st.download_button("📥 Download Final Results", out_excel.getvalue(), "Completed_Catalog.xlsx")
 
     else:
+        # ZIP FILE Execution Fallback
         zip_buffer = BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zip_f:
             for i, item in enumerate(data_to_process):
                 st_txt.text(f"Zipping {i+1}/{total}: {item['sku']}")
                 try:
-                    img = item['content'] if item['type'] == "file" else Image.open(BytesIO(requests.get(get_direct_url(item['content'])).content))
+                    raw_img = item['content'] if item['type'] == "file" else Image.open(BytesIO(requests.get(get_direct_url(item['content'])).content))
                     
-                    if use_resizer:
-                        proc_img = process_image_pipeline(img, target_w, target_h, final_color_rgb, bg_mode)
-                        img_buf = BytesIO(); proc_img.save(img_buf, format="JPEG", quality=90)
-                        zip_f.writestr(f"{item['sku']}.jpg", img_buf.getvalue())
-                    else:
-                        proc_img = img
+                    proc_img = process_image_pipeline(raw_img, target_w, target_h, final_color_rgb, bg_mode)
+                    img_buf = BytesIO()
+                    proc_img.save(img_buf, format="JPEG", quality=90)
+                    zip_f.writestr(f"{item['sku']}.jpg", img_buf.getvalue())
                     
-                    if use_ai_content and selected_ai_fields and GEMINI_API_KEY:
-                        ai_outputs = generate_dynamic_content(proc_img, selected_ai_fields, mapping_context_str)
+                    if use_ai and GEMINI_API_KEY:
+                        ai_outputs = generate_product_info(proc_img)
                         zip_f.writestr(f"{item['sku']}_metadata.json", json.dumps(ai_outputs, indent=4))
                 except: pass
                 pb.progress((i + 1) / total)
