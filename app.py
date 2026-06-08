@@ -9,6 +9,7 @@ import base64
 from rembg import remove
 import json
 import time
+import os
 from google import genai
 
 # --- 1. SECURE CONFIGURATION ---
@@ -58,22 +59,30 @@ def process_image_pipeline(img, tw, th, final_color_rgb, bg_mode):
     return new_img
 
 def upload_to_imgbb(img_buffer, psku):
-    """Uploads image to ImgBB as a standard multipart file attachment to prevent 400 Bad Request errors."""
-    url = "https://api.imgbb.com/1/upload"
+    """Uploads image to ImgBB and extracts specific server errors if it fails."""
+    # Pass the key in the URL directly to ensure ImgBB catches authentication
+    url = f"https://api.imgbb.com/1/upload?key={IMGBB_API_KEY}"
+    
+    b64_img = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
     payload = {
-        "key": IMGBB_API_KEY,
-        "name": f"sku_{psku}"
+        "image": b64_img,
+        "name": str(psku)[:50] # Keep names short to prevent character limits
     }
-    # Package the bytes as a file attachment instead of a massive base64 text string
-    files = {
-        "image": ("image.jpg", img_buffer.getvalue(), "image/jpeg")
-    }
-    res = requests.post(url, data=payload, files=files)
-    res.raise_for_status()
+    
+    res = requests.post(url, data=payload)
+    
+    if not res.ok:
+        # Extract the exact reason ImgBB rejected it
+        error_msg = res.text
+        try:
+            error_msg = res.json().get("error", {}).get("message", res.text)
+        except:
+            pass
+        raise Exception(f"ImgBB API Rejected: {error_msg}")
+        
     return res.json()["data"]["url"]
 
 def generate_product_info(img):
-    """Passes the image to Gemini to extract fixed standard catalog columns."""
     if not GEMINI_API_KEY:
         return {}
         
@@ -93,10 +102,7 @@ def generate_product_info(img):
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=[img, prompt]
-            )
+            response = client.models.generate_content(model='gemini-2.5-flash', contents=[img, prompt])
             raw = response.text.strip()
             
             backticks = chr(96) * 3
@@ -105,7 +111,6 @@ def generate_product_info(img):
                 raw = re.sub(r"\s*" + re.escape(backticks) + r"$", "", raw)
                 
             return json.loads(raw.strip())
-            
         except Exception as e:
             if "503" in str(e) or "UNAVAILABLE" in str(e):
                 if attempt < max_retries - 1:
@@ -117,6 +122,20 @@ def generate_product_info(img):
 
 # --- 2. UI LAYOUT ---
 st.set_page_config(page_title="Catalog Studio", layout="wide")
+
+# --- EMERGENCY RECOVERY BLOCK ---
+if os.path.exists("recovery_backup.csv"):
+    st.error("⚠️ **Interrupted Session Detected!**")
+    st.write("It looks like your previous run crashed or the page was refreshed before finishing. You can download the partially completed file below.")
+    with open("recovery_backup.csv", "rb") as file:
+        st.download_button(
+            label="🚑 Download Emergency Backup",
+            data=file,
+            file_name="recovered_catalog_partial.csv",
+            mime="text/csv"
+        )
+    st.divider()
+
 st.title("🏭 Catalog Studio")
 
 st.markdown("### 🛠️ Step 1: Select Your Workflow")
@@ -130,7 +149,6 @@ use_resizer = True
 use_ai = "AI" in tool_mode
 
 # --- CONDITIONAL UI BLOCKS ---
-
 with st.container(border=True):
     st.subheader("⚙️ Image Resizer Configuration")
     s1, s2 = st.columns(2)
@@ -168,6 +186,10 @@ i1, i2 = st.columns(2)
 with i1: input_mode = st.selectbox("Input Source", ["Links (Excel/CSV Sheet)", "Local Image Files"])
 with i2: output_mode = st.selectbox("Output Format", ["Links (Excel Sheet)", "Images (ZIP File)"])
 
+smart_skip = False
+if input_mode == "Links (Excel/CSV Sheet)":
+    smart_skip = st.toggle("⏭️ Smart Resume (Skip processed items)", value=True, help="If you re-upload a partially completed sheet, this will ignore rows that already have a Resized Link.")
+
 data_to_process = []
 df_original = None
 
@@ -181,6 +203,11 @@ if input_mode == "Links (Excel/CSV Sheet)":
         if url_cols:
             for idx, row in df_original.iterrows():
                 for col in url_cols:
+                    if smart_skip and "Resized Link" in df_original.columns:
+                        existing_link = str(df_original.at[idx, "Resized Link"]).strip()
+                        if existing_link.startswith("http"):
+                            continue 
+                            
                     data_to_process.append({"sku": str(row[sku_col]), "content": row[col], "col_name": col, "row_idx": idx, "type": "url"})
 else:
     uploaded_imgs = st.file_uploader("Upload Target Images", type=["jpg", "png", "webp"], accept_multiple_files=True)
@@ -204,9 +231,6 @@ if st.button("🚀 Start Production Loop") and data_to_process:
         for i, item in enumerate(data_to_process):
             st_txt.text(f"Processing Loop {i+1}/{total}: {item['sku']}")
             try:
-                proc_img = None
-                
-                # Fetch Raw Image with URL Validation
                 if item['type'] == "url":
                     link_val = str(item['content']).strip()
                     if not link_val.startswith("http"):
@@ -217,22 +241,18 @@ if st.button("🚀 Start Production Loop") and data_to_process:
                 else:
                     raw_img = item['content']
 
-                # Resizer Execution
                 proc_img = process_image_pipeline(raw_img, target_w, target_h, final_color_rgb, bg_mode)
                 buf = BytesIO()
                 proc_img.save(buf, format="JPEG", quality=90)
                 buf.seek(0)
                 
-                # Upload to ImgBB
                 res_link = upload_to_imgbb(buf, item['sku'])
                 
-                # Save links
                 target_idx = i if input_mode == "Local Image Files" else item['row_idx']
                 if input_mode == "Local Image Files":
                     results_df.at[target_idx, "psku"] = item['sku']
                 results_df.at[target_idx, "Resized Link"] = res_link
                 
-                # AI Content Execution
                 if use_ai and GEMINI_API_KEY:
                     st_txt.text(f"🤖 Gemini analyzing product {i+1}/{total}: {item['sku']}")
                     ai_outputs = generate_product_info(proc_img)
@@ -245,12 +265,15 @@ if st.button("🚀 Start Production Loop") and data_to_process:
                         results_df.at[target_idx, "AI Diagnostics"] = ai_outputs.get("error")
                             
             except Exception as e: 
-                # Log the error directly to the excel sheet so you can see which ones failed
                 target_idx = i if input_mode == "Local Image Files" else item['row_idx']
                 results_df.at[target_idx, "Resized Link"] = f"Error: {str(e)}"
-                
+            
+            results_df.to_csv("recovery_backup.csv", index=False)
             pb.progress((i + 1) / total)
 
+        if os.path.exists("recovery_backup.csv"):
+            os.remove("recovery_backup.csv")
+            
         st.success("✅ Automation completed successfully!")
         out_excel = BytesIO()
         with pd.ExcelWriter(out_excel, engine='openpyxl') as writer:
@@ -258,7 +281,6 @@ if st.button("🚀 Start Production Loop") and data_to_process:
         st.download_button("📥 Download Final Results", out_excel.getvalue(), "Completed_Catalog.xlsx")
 
     else:
-        # ZIP FILE Execution Fallback
         zip_buffer = BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zip_f:
             for i, item in enumerate(data_to_process):
