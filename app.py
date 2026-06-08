@@ -21,7 +21,7 @@ if not IMGBB_API_KEY:
 
 # --- HELPER FUNCTIONS ---
 def get_direct_url(url):
-    if pd.isna(url): return url
+    if pd.isna(url): return ""
     url = str(url).strip().replace('\n', '').replace('\r', '').replace('%0A', '')
     if "drive.google.com" in url:
         match = re.search(r"/d/([a-zA-Z0-9_-]{25,})", url)
@@ -58,13 +58,17 @@ def process_image_pipeline(img, tw, th, final_color_rgb, bg_mode):
     return new_img
 
 def upload_to_imgbb(img_buffer, psku):
+    """Uploads image to ImgBB as a standard multipart file attachment to prevent 400 Bad Request errors."""
     url = "https://api.imgbb.com/1/upload"
     payload = {
         "key": IMGBB_API_KEY,
-        "image": base64.b64encode(img_buffer.getvalue()).decode("utf-8"),
         "name": f"sku_{psku}"
     }
-    res = requests.post(url, data=payload)
+    # Package the bytes as a file attachment instead of a massive base64 text string
+    files = {
+        "image": ("image.jpg", img_buffer.getvalue(), "image/jpeg")
+    }
+    res = requests.post(url, data=payload, files=files)
     res.raise_for_status()
     return res.json()["data"]["url"]
 
@@ -122,7 +126,6 @@ tool_mode = st.radio(
     horizontal=True
 )
 
-# AI mode inherently requires and includes the resizer for a clean image background
 use_resizer = True 
 use_ai = "AI" in tool_mode
 
@@ -203,18 +206,24 @@ if st.button("🚀 Start Production Loop") and data_to_process:
             try:
                 proc_img = None
                 
-                # Fetch Raw Image
-                if item['type'] == "file":
-                    raw_img = item['content']
-                else:
-                    resp = requests.get(get_direct_url(item['content']), timeout=15)
+                # Fetch Raw Image with URL Validation
+                if item['type'] == "url":
+                    link_val = str(item['content']).strip()
+                    if not link_val.startswith("http"):
+                        raise ValueError(f"Skipped: Not a valid URL link ('{link_val}')")
+                    resp = requests.get(get_direct_url(link_val), timeout=15)
+                    resp.raise_for_status()
                     raw_img = Image.open(BytesIO(resp.content))
+                else:
+                    raw_img = item['content']
 
-                # Resizer Execution (Always runs as the base canvas for both modes)
+                # Resizer Execution
                 proc_img = process_image_pipeline(raw_img, target_w, target_h, final_color_rgb, bg_mode)
                 buf = BytesIO()
                 proc_img.save(buf, format="JPEG", quality=90)
                 buf.seek(0)
+                
+                # Upload to ImgBB
                 res_link = upload_to_imgbb(buf, item['sku'])
                 
                 # Save links
@@ -236,7 +245,10 @@ if st.button("🚀 Start Production Loop") and data_to_process:
                         results_df.at[target_idx, "AI Diagnostics"] = ai_outputs.get("error")
                             
             except Exception as e: 
-                st.error(f"Error on {item['sku']}: {e}")
+                # Log the error directly to the excel sheet so you can see which ones failed
+                target_idx = i if input_mode == "Local Image Files" else item['row_idx']
+                results_df.at[target_idx, "Resized Link"] = f"Error: {str(e)}"
+                
             pb.progress((i + 1) / total)
 
         st.success("✅ Automation completed successfully!")
@@ -252,7 +264,13 @@ if st.button("🚀 Start Production Loop") and data_to_process:
             for i, item in enumerate(data_to_process):
                 st_txt.text(f"Zipping {i+1}/{total}: {item['sku']}")
                 try:
-                    raw_img = item['content'] if item['type'] == "file" else Image.open(BytesIO(requests.get(get_direct_url(item['content'])).content))
+                    if item['type'] == "url":
+                        link_val = str(item['content']).strip()
+                        if not link_val.startswith("http"):
+                            raise ValueError("Invalid URL")
+                        raw_img = Image.open(BytesIO(requests.get(get_direct_url(link_val), timeout=15).content))
+                    else:
+                        raw_img = item['content']
                     
                     proc_img = process_image_pipeline(raw_img, target_w, target_h, final_color_rgb, bg_mode)
                     img_buf = BytesIO()
