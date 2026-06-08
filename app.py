@@ -21,6 +21,12 @@ if not IMGBB_API_KEY:
     st.stop()
 
 # --- HELPER FUNCTIONS ---
+# This is the fake browser ID so websites don't block the download
+REQ_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
+}
+
 def get_direct_url(url):
     if pd.isna(url): return ""
     url = str(url).strip().replace('\n', '').replace('\r', '').replace('%0A', '')
@@ -245,7 +251,9 @@ if st.button("🚀 Start Production Loop") and data_to_process:
                     link_val = str(item['content']).strip()
                     if not link_val.startswith("http"):
                         raise ValueError(f"Skipped: Not a valid URL link ('{link_val}')")
-                    resp = requests.get(get_direct_url(link_val), timeout=15)
+                    
+                    # Passed the fake headers here!
+                    resp = requests.get(get_direct_url(link_val), headers=REQ_HEADERS, timeout=15)
                     resp.raise_for_status()
                     try:
                         raw_img = Image.open(BytesIO(resp.content))
@@ -304,7 +312,9 @@ if st.button("🚀 Start Production Loop") and data_to_process:
                         link_val = str(item['content']).strip()
                         if not link_val.startswith("http"):
                             raise ValueError("Invalid URL")
-                        resp = requests.get(get_direct_url(link_val), timeout=15)
+                            
+                        # Passed the fake headers here as well!
+                        resp = requests.get(get_direct_url(link_val), headers=REQ_HEADERS, timeout=15)
                         try:
                             raw_img = Image.open(BytesIO(resp.content))
                         except UnidentifiedImageError:
