@@ -21,7 +21,6 @@ if not IMGBB_API_KEY:
     st.stop()
 
 # --- HELPER FUNCTIONS ---
-# This is the fake browser ID so websites don't block the download
 REQ_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
@@ -71,14 +70,24 @@ def upload_to_imgbb(img_buffer, psku):
         "image": b64_img,
         "name": str(psku)[:50] 
     }
-    res = requests.post(url, data=payload)
-    if not res.ok:
+    
+    for attempt in range(3):
+        res = requests.post(url, data=payload)
+        if res.ok:
+            return res.json()["data"]["url"]
+            
         error_msg = res.text
         try:
             error_msg = res.json().get("error", {}).get("message", res.text)
         except: pass
-        raise Exception(f"ImgBB API Rejected: {error_msg}")
-    return res.json()["data"]["url"]
+        
+        if "Rate limit" in error_msg or res.status_code in [429, 503]:
+            time.sleep(3) 
+            continue
+        else:
+            raise Exception(f"ImgBB API Rejected: {error_msg}")
+            
+    raise Exception("ImgBB Rate Limit reached after multiple retries.")
 
 def generate_product_info(img):
     if not GEMINI_API_KEY: return {}
@@ -134,29 +143,31 @@ st.title("🏭 Catalog Studio")
 st.markdown("### 🛠️ Step 1: Select Your Workflow")
 tool_mode = st.radio(
     "Active Mode:", 
-    ["🖼️ Image Resizer Only", "✨ AI Content Generation (Includes Resizer)"],
+    ["🖼️ Image Resizer Only", "✨ AI Content Generation (Includes Resizer)", "📥 Bulk Downloader (Rename & ZIP)"],
     horizontal=True
 )
 
-use_resizer = True 
+use_resizer = "Resizer" in tool_mode or "AI" in tool_mode
 use_ai = "AI" in tool_mode
+use_downloader = "Bulk Downloader" in tool_mode
 
-with st.container(border=True):
-    st.subheader("⚙️ Image Resizer Configuration")
-    s1, s2 = st.columns(2)
-    with s1:
-        target_w = st.number_input("Width (px)", min_value=10, value=660)
-        target_h = st.number_input("Height (px)", min_value=10, value=900)
-        bg_mode = st.toggle("AI Background Removal (rembg)", value=False, help="Isolates the product image.")
-    with s2:
-        st.write("**Canvas Background Fill**")
-        color_type = st.radio("Style:", ["Standard White", "Automatic (Match Image)", "Custom Color"], horizontal=True)
-        if color_type == "Custom Color": 
-            final_color_rgb = hex_to_rgb(st.color_picker("Pick color", "#FFFFFF"))
-        elif color_type == "Standard White": 
-            final_color_rgb = (255, 255, 255)
-        else: 
-            final_color_rgb = "AUTO"
+if use_resizer:
+    with st.container(border=True):
+        st.subheader("⚙️ Image Resizer Configuration")
+        s1, s2 = st.columns(2)
+        with s1:
+            target_w = st.number_input("Width (px)", min_value=10, value=660)
+            target_h = st.number_input("Height (px)", min_value=10, value=900)
+            bg_mode = st.toggle("AI Background Removal (rembg)", value=False, help="Isolates the product image.")
+        with s2:
+            st.write("**Canvas Background Fill**")
+            color_type = st.radio("Style:", ["Standard White", "Automatic (Match Image)", "Custom Color"], horizontal=True)
+            if color_type == "Custom Color": 
+                final_color_rgb = hex_to_rgb(st.color_picker("Pick color", "#FFFFFF"))
+            elif color_type == "Standard White": 
+                final_color_rgb = (255, 255, 255)
+            else: 
+                final_color_rgb = "AUTO"
 
 ai_liability_accepted = False
 if use_ai:
@@ -170,6 +181,11 @@ if use_ai:
             value=False
         )
 
+if use_downloader:
+    with st.container(border=True):
+        st.subheader("📥 Pure Downloader Mode")
+        st.info("This mode skips resizing, AI, and ImgBB. It purely downloads the raw images from your links, renames them by SKU, and provides a ZIP file.")
+
 st.divider()
 
 st.markdown("### 📂 Step 2: Upload Target Data")
@@ -177,11 +193,15 @@ i1, i2 = st.columns(2)
 
 with i1: 
     input_mode = st.selectbox("Input Source", ["Links (Excel/CSV Sheet)", "Local Image Files"])
+    
 with i2: 
-    output_mode = st.selectbox("Output Format", ["Links (Excel Sheet)", "Images (ZIP File)"])
+    if use_downloader:
+        output_mode = st.selectbox("Output Format", ["Images (ZIP File)"], disabled=True)
+    else:
+        output_mode = st.selectbox("Output Format", ["Links (Excel Sheet)", "Images (ZIP File)"])
 
 smart_skip = False
-if input_mode == "Links (Excel/CSV Sheet)":
+if input_mode == "Links (Excel/CSV Sheet)" and not use_downloader:
     smart_skip = st.toggle("⏭️ Smart Resume (Skip processed items)", value=True, help="Ignores rows that already have a Resized Link.")
 
 data_to_process = []
@@ -204,13 +224,16 @@ if input_mode == "Links (Excel/CSV Sheet)":
         if url_cols:
             for idx, row in df_original.iterrows():
                 for col in url_cols:
+                    if pd.isna(row[col]) or str(row[col]).strip().lower() == 'nan' or str(row[col]).strip() == "":
+                        continue
+                        
                     if smart_skip and "Resized Link" in df_original.columns:
                         existing_link = str(df_original.at[idx, "Resized Link"]).strip()
                         if existing_link.startswith("http"): 
                             continue 
                     
                     data_to_process.append({
-                        "sku": str(row[sku_col]), 
+                        "sku": str(row[sku_col]).strip(), 
                         "content": row[col], 
                         "col_name": col, 
                         "row_idx": idx, 
@@ -221,7 +244,7 @@ else:
     if uploaded_imgs:
         for img_file in uploaded_imgs:
             data_to_process.append({
-                "sku": img_file.name.rsplit('.', 1)[0], 
+                "sku": img_file.name.rsplit('.', 1)[0].strip(), 
                 "content": Image.open(img_file), 
                 "col_name": "file", 
                 "type": "file"
@@ -236,7 +259,40 @@ if st.button("🚀 Start Production Loop") and data_to_process:
     st_txt = st.empty()
     total = len(data_to_process)
     
-    if output_mode == "Links (Excel Sheet)":
+    # -------------------------------------------------------------------------
+    # NEW FEATURE: PURE BULK DOWNLOADER MODE
+    # -------------------------------------------------------------------------
+    if use_downloader:
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zip_f:
+            for i, item in enumerate(data_to_process):
+                st_txt.text(f"Downloading {i+1}/{total}: {item['sku']}")
+                try:
+                    if item['type'] == "url":
+                        link_val = str(item['content']).strip()
+                        if link_val.startswith("http"):
+                            resp = requests.get(get_direct_url(link_val), headers=REQ_HEADERS, timeout=15)
+                            resp.raise_for_status()
+                            # Save exactly as downloaded (raw bytes)
+                            zip_f.writestr(f"{item['sku']}.jpg", resp.content)
+                    else:
+                        # If user uploaded local files and wants them re-zipped/renamed
+                        img_buf = BytesIO()
+                        item['content'].save(img_buf, format="JPEG", quality=100)
+                        zip_f.writestr(f"{item['sku']}.jpg", img_buf.getvalue())
+                except Exception as e:
+                    pass # Skip failures quietly to keep zip compiling
+                
+                time.sleep(0.5) # Anti-firewall pause
+                pb.progress((i + 1) / total)
+                
+        st.success("✅ Bulk Download & Rename Complete!")
+        st.download_button("📥 Download ZIP Package", zip_buffer.getvalue(), "Renamed_Raw_Images.zip")
+
+    # -------------------------------------------------------------------------
+    # ORIGINAL PIPELINE (EXCEL LINKS)
+    # -------------------------------------------------------------------------
+    elif output_mode == "Links (Excel Sheet)":
         if input_mode == "Links (Excel/CSV Sheet)":
             results_df = df_original.copy()
         else:
@@ -252,7 +308,6 @@ if st.button("🚀 Start Production Loop") and data_to_process:
                     if not link_val.startswith("http"):
                         raise ValueError(f"Skipped: Not a valid URL link ('{link_val}')")
                     
-                    # Passed the fake headers here!
                     resp = requests.get(get_direct_url(link_val), headers=REQ_HEADERS, timeout=15)
                     resp.raise_for_status()
                     try:
@@ -289,8 +344,8 @@ if st.button("🚀 Start Production Loop") and data_to_process:
             except Exception as e: 
                 results_df.at[target_idx, "Resized Link"] = f"Error: {str(e)}"
             
-            # Live Backup
             results_df.to_csv("recovery_backup.csv", index=False)
+            time.sleep(0.5) 
             pb.progress((i + 1) / total)
 
         if os.path.exists("recovery_backup.csv"):
@@ -302,6 +357,9 @@ if st.button("🚀 Start Production Loop") and data_to_process:
             results_df.to_excel(writer, index=False)
         st.download_button("📥 Download Final Results", out_excel.getvalue(), "Completed_Catalog.xlsx")
 
+    # -------------------------------------------------------------------------
+    # ORIGINAL PIPELINE (ZIP FILE OUTPUT)
+    # -------------------------------------------------------------------------
     else:
         zip_buffer = BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zip_f:
@@ -313,7 +371,6 @@ if st.button("🚀 Start Production Loop") and data_to_process:
                         if not link_val.startswith("http"):
                             raise ValueError("Invalid URL")
                             
-                        # Passed the fake headers here as well!
                         resp = requests.get(get_direct_url(link_val), headers=REQ_HEADERS, timeout=15)
                         try:
                             raw_img = Image.open(BytesIO(resp.content))
@@ -334,6 +391,7 @@ if st.button("🚀 Start Production Loop") and data_to_process:
                     pass 
                 except Exception:
                     pass
+                time.sleep(0.5)
                 pb.progress((i + 1) / total)
         st.success("✅ ZIP Generated!")
         st.download_button("📥 Download ZIP Package", zip_buffer.getvalue(), "processed_images.zip")
