@@ -10,15 +10,11 @@ from rembg import remove
 import json
 import time
 import os
+import hashlib
 from google import genai
 
 # --- 1. SECURE CONFIGURATION ---
-IMGBB_API_KEY = st.secrets.get("IMGBB_API_KEY")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY")
-
-if not IMGBB_API_KEY:
-    st.error("🚨 **ImgBB API Key Missing!** Please add `IMGBB_API_KEY` to your Streamlit Secrets.")
-    st.stop()
 
 # --- HELPER FUNCTIONS ---
 REQ_HEADERS = {
@@ -63,31 +59,52 @@ def process_image_pipeline(img, tw, th, final_color_rgb, bg_mode):
         new_img.paste(img, paste_pos)
     return new_img
 
-def upload_to_imgbb(img_buffer, psku):
-    url = f"https://api.imgbb.com/1/upload?key={IMGBB_API_KEY}"
+def upload_to_imgbb(img_buffer, psku, api_key):
+    url = f"https://api.imgbb.com/1/upload?key={api_key}"
     b64_img = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
     payload = {
         "image": b64_img,
         "name": str(psku)[:50] 
     }
     
-    for attempt in range(3):
+    for attempt in range(5):
         res = requests.post(url, data=payload)
         if res.ok:
             return res.json()["data"]["url"]
             
         error_msg = res.text
-        try:
-            error_msg = res.json().get("error", {}).get("message", res.text)
+        try: error_msg = res.json().get("error", {}).get("message", res.text)
         except: pass
         
-        if "Rate limit" in error_msg or res.status_code in [429, 503]:
-            time.sleep(3) 
+        if "Rate limit" in error_msg or res.status_code in [429, 503, 400]:
+            time.sleep(5 + (attempt * 5)) 
             continue
         else:
             raise Exception(f"ImgBB API Rejected: {error_msg}")
             
     raise Exception("ImgBB Rate Limit reached after multiple retries.")
+
+def upload_to_cloudinary(img_buffer, psku, cloud_name, api_key, api_secret):
+    url = f"https://api.cloudinary.com/v1_1/{cloud_name}/image/upload"
+    timestamp = str(int(time.time()))
+    public_id = re.sub(r'[^a-zA-Z0-9_-]', '_', str(psku)[:50]) 
+    
+    sign_str = f"public_id={public_id}&timestamp={timestamp}{api_secret}"
+    signature = hashlib.sha1(sign_str.encode('utf-8')).hexdigest()
+    
+    files = {'file': ('image.jpg', img_buffer.getvalue(), 'image/jpeg')}
+    data = {
+        'api_key': api_key,
+        'timestamp': timestamp,
+        'public_id': public_id,
+        'signature': signature
+    }
+    
+    res = requests.post(url, files=files, data=data)
+    if res.ok:
+        return res.json()["secure_url"]
+    else:
+        raise Exception(f"Cloudinary Error: {res.text}")
 
 def generate_product_info(img):
     if not GEMINI_API_KEY: return {}
@@ -104,8 +121,7 @@ def generate_product_info(img):
     Provide accurate information. Return ONLY the raw JSON object. Do not wrap it in markdown code blocks.
     """
     
-    max_retries = 3
-    for attempt in range(max_retries):
+    for attempt in range(3):
         try:
             response = client.models.generate_content(model='gemini-2.5-flash', contents=[img, prompt])
             raw = response.text.strip()
@@ -116,7 +132,7 @@ def generate_product_info(img):
             return json.loads(raw.strip())
         except Exception as e:
             if "503" in str(e) or "UNAVAILABLE" in str(e):
-                if attempt < max_retries - 1:
+                if attempt < 2:
                     time.sleep(2 + attempt * 2)
                     continue
             return {"error": f"AI Error: {str(e)}"}
@@ -126,13 +142,50 @@ def generate_product_info(img):
 st.set_page_config(page_title="Catalog Studio", layout="wide")
 st.title("🏭 Catalog Studio")
 
-# --- STEP 0: SECURE WORKSPACE & BACKUP ISOLATION ---
-st.markdown("### 🔐 Step 0: Secure Workspace")
-session_key = st.text_input("Workspace / User ID:", placeholder="e.g. JohnDoe or Batch_42", help="Creates a secure, isolated container for your progress backups.")
+# --- USER GUIDE EXPANDER ---
+with st.expander("📖 Quick Start Guide & How to Get API Keys"):
+    st.markdown("""
+    ### How to use this tool:
+    **1. Secure your Workspace:** Always type your Name or Batch ID in Step 0. This creates a hidden backup. If your internet crashes mid-batch, you can type that exact name back in to download your recovered file!
+    
+    **2. Setup your Personal Cloud (Optional):** If you want the app to hand you an Excel sheet full of live image links, you must plug in your own free cloud storage keys. This bypasses global server rate limits.
+    * **Option A: ImgBB (Easy but Strict Limits):** Go to [api.imgbb.com](https://api.imgbb.com/), create a free account, and copy your API Key.
+    * **Option B: Cloudinary (Professional & Fast):** Go to [cloudinary.com](https://cloudinary.com/) and sign up for free. Go to your Dashboard -> *Product Environment Credentials*. Copy your **Cloud Name**, **API Key**, and **API Secret**.
+    
+    **3. Choose your Workflow:**
+    * **Excel Links:** The full pipeline. Resizes images, optionally generates AI content, uploads to your cloud, and returns a finished Excel file.
+    * **Modified Images (ZIP):** Bypasses the cloud entirely. Resizes/pads your images and gives you a downloaded ZIP file. Excellent for uploading directly into WordPress/Shopify!
+    * **Original Raw Images (ZIP):** Pure downloader mode. Skips all AI and resizing. Just grabs the raw images from your links and names them by SKU. Perfect for bypassing strict website firewalls.
+    
+    **4. Upload & Run:** Drop your Excel sheet (or local image files) in Step 2, map your columns, and click Start!
+    """)
 
-if not session_key.strip():
-    st.warning("⚠️ Please enter a Workspace ID above to unlock the tools.")
-    st.stop()
+# --- STEP 0: SECURE WORKSPACE & USER CLOUD KEYS ---
+with st.container(border=True):
+    st.markdown("### 🔐 Step 0: Workspace & Cloud Credentials")
+    session_key = st.text_input("Workspace / User ID:", placeholder="e.g. JohnDoe or Batch_42", help="Creates a secure, isolated container for your progress backups.")
+
+    if not session_key.strip():
+        st.warning("⚠️ Please enter a Workspace ID above to unlock the tools.")
+        st.stop()
+
+    st.divider()
+    st.markdown("#### ☁️ Personal Image Cloud (Optional)")
+    st.write("To generate live Excel links, enter your personal cloud API keys. This ensures you never hit global rate limits.")
+    cloud_provider = st.selectbox("Select Cloud Provider:", ["None (ZIP Outputs Only)", "ImgBB (Free)", "Cloudinary (Pro)"])
+    
+    user_imgbb_key = ""
+    user_cloud_name = ""
+    user_cloud_api = ""
+    user_cloud_secret = ""
+    
+    if cloud_provider == "ImgBB (Free)":
+        user_imgbb_key = st.text_input("ImgBB API Key:", type="password")
+    elif cloud_provider == "Cloudinary (Pro)":
+        c1, c2, c3 = st.columns(3)
+        with c1: user_cloud_name = st.text_input("Cloud Name:")
+        with c2: user_cloud_api = st.text_input("API Key:", type="password")
+        with c3: user_cloud_secret = st.text_input("API Secret:", type="password")
 
 safe_key = re.sub(r'[^a-zA-Z0-9_-]', '_', session_key.strip())
 backup_filename = f"recovery_backup_{safe_key}.csv"
@@ -152,15 +205,16 @@ if os.path.exists(backup_filename):
 
 # --- STEP 1: WORKFLOW SELECTION ---
 st.markdown("### 🛠️ Step 1: Select Your Objective")
-workflow = st.radio(
-    "What do you want to generate?",
-    [
-        "📊 Resize & Upload -> Excel Links", 
-        "📦 Resize & Zip -> Modified Images", 
-        "📥 Pure Downloader -> Original Raw Images (ZIP)"
-    ],
-    horizontal=True
-)
+
+available_workflows = [
+    "📦 Resize & Zip -> Modified Images", 
+    "📥 Pure Downloader -> Original Raw Images (ZIP)"
+]
+# Only allow Excel Link mode if they provided Cloud keys
+if cloud_provider != "None (ZIP Outputs Only)":
+    available_workflows.insert(0, "📊 Resize & Upload -> Excel Links")
+
+workflow = st.radio("What do you want to generate?", available_workflows, horizontal=True)
 
 use_resizer = "Resize" in workflow
 use_ai = False
@@ -196,7 +250,7 @@ st.markdown("### 📂 Step 2: Upload Target Data")
 input_mode = st.selectbox("Input Source", ["Links (Excel/CSV Sheet)", "Local Image Files"])
 
 smart_skip = False
-if input_mode == "Links (Excel/CSV Sheet)" and workflow == "📊 Resize & Upload -> Excel Links":
+if input_mode == "Links (Excel/CSV Sheet)" and "Excel Links" in workflow:
     smart_skip = st.toggle("⏭️ Smart Resume (Skip processed items)", value=True, help="Ignores rows that already have a Resized Link.")
 
 data_to_process = []
@@ -229,18 +283,27 @@ else:
 
 # --- EXECUTION ENGINE ---
 if st.button("🚀 Start Production Loop") and data_to_process:
+    # Security Checks
     if use_ai and not ai_liability_accepted:
         st.error("🚨 Execution Blocked: You must read and check the AI Liability Disclaimer box to use content features.")
         st.stop()
+        
+    if "Excel Links" in workflow:
+        if cloud_provider == "ImgBB (Free)" and not user_imgbb_key:
+            st.error("🚨 Please enter your ImgBB API Key in Step 0.")
+            st.stop()
+        elif cloud_provider == "Cloudinary (Pro)" and (not user_cloud_name or not user_cloud_api or not user_cloud_secret):
+            st.error("🚨 Please enter all 3 Cloudinary keys in Step 0.")
+            st.stop()
         
     pb = st.progress(0)
     st_txt = st.empty()
     total = len(data_to_process)
     
     # -------------------------------------------------------------------------
-    # PIPELINE 1: RESIZE & UPLOAD TO EXCEL
+    # PIPELINE 1: RESIZE & UPLOAD TO EXCEL (USER CLOUD)
     # -------------------------------------------------------------------------
-    if workflow == "📊 Resize & Upload -> Excel Links":
+    if "Excel Links" in workflow:
         results_df = df_original.copy() if input_mode == "Links (Excel/CSV Sheet)" else pd.DataFrame(columns=["psku"])
             
         for i, item in enumerate(data_to_process):
@@ -266,7 +329,11 @@ if st.button("🚀 Start Production Loop") and data_to_process:
                 proc_img.save(buf, format="JPEG", quality=90)
                 buf.seek(0)
                 
-                res_link = upload_to_imgbb(buf, item['sku'])
+                # UPLOAD TO USER'S SELECTED CLOUD
+                if cloud_provider == "ImgBB (Free)":
+                    res_link = upload_to_imgbb(buf, item['sku'], user_imgbb_key)
+                elif cloud_provider == "Cloudinary (Pro)":
+                    res_link = upload_to_cloudinary(buf, item['sku'], user_cloud_name, user_cloud_api, user_cloud_secret)
                 
                 if input_mode == "Local Image Files": results_df.at[target_idx, "psku"] = item['sku']
                 results_df.at[target_idx, "Resized Link"] = res_link
@@ -284,7 +351,7 @@ if st.button("🚀 Start Production Loop") and data_to_process:
                 results_df.at[target_idx, "Resized Link"] = f"Error: {str(e)}"
             
             results_df.to_csv(backup_filename, index=False)
-            time.sleep(0.5) 
+            time.sleep(1.0) # Standard limit safety pause
             pb.progress((i + 1) / total)
 
         if os.path.exists(backup_filename): os.remove(backup_filename)
@@ -297,7 +364,7 @@ if st.button("🚀 Start Production Loop") and data_to_process:
     # -------------------------------------------------------------------------
     # PIPELINE 2: RESIZE & ZIP IMAGES
     # -------------------------------------------------------------------------
-    elif workflow == "📦 Resize & Zip -> Modified Images":
+    elif "Modified Images" in workflow:
         zip_buffer = BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zip_f:
             for i, item in enumerate(data_to_process):
@@ -328,7 +395,7 @@ if st.button("🚀 Start Production Loop") and data_to_process:
     # -------------------------------------------------------------------------
     # PIPELINE 3: PURE RAW DOWNLOADER
     # -------------------------------------------------------------------------
-    elif workflow == "📥 Pure Downloader -> Original Raw Images (ZIP)":
+    elif "Original Raw Images" in workflow:
         zip_buffer = BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zip_f:
             for i, item in enumerate(data_to_process):
