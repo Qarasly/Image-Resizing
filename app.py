@@ -12,8 +12,10 @@ import time
 import os
 import hashlib
 from google import genai
+import pillow_avif # Required for AVIF support
 
 # --- 1. SECURE CONFIGURATION ---
+# We keep Gemini in secrets since Google's free tier is massive, but Cloud is now dynamic!
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY")
 
 # --- HELPER FUNCTIONS ---
@@ -276,7 +278,8 @@ if input_mode == "Links (Excel/CSV Sheet)":
                     
                     data_to_process.append({"sku": str(row[sku_col]).strip(), "content": row[col], "col_name": col, "row_idx": idx, "type": "url"})
 else:
-    uploaded_imgs = st.file_uploader("Upload Target Images", type=["jpg", "png", "webp"], accept_multiple_files=True)
+    # UPDATED to strictly support jpeg and avif 
+    uploaded_imgs = st.file_uploader("Upload Target Images", type=["jpg", "jpeg", "png", "webp", "avif"], accept_multiple_files=True)
     if uploaded_imgs:
         for img_file in uploaded_imgs:
             data_to_process.append({"sku": img_file.name.rsplit('.', 1)[0].strip(), "content": Image.open(img_file), "col_name": "file", "type": "file"})
