@@ -5,3 +5,4 @@ openpyxl
 Pillow
 rembg[cpu]
 google-genai
+pillow-avif-plugin
